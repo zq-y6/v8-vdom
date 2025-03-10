@@ -1,0 +1,3 @@
+[submodule "vdom-artifact"]
+	path = vdom-artifact
+	url = https://github.com/monikerzju/vdom-artifact.git
