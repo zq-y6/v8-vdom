@@ -1,0 +1,1723 @@
+diff --git a/BUILD.gn b/BUILD.gn
+index 96680594..1e5112a5 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -7138,6 +7138,25 @@ if (v8_check_header_includes) {
+ # Produce a single static library for embedders
+ #
+ 
++shared_library("libvkeyss") {
++  sources = [
++    "src/base/platform/libvkeys/libvkeys.c",
++    "src/base/platform/libvkeys/libvkeys.h",
++  ]
++  include_dirs = [ "src/base/platform/libvkeys" ]
++
++  cflags = [
++    "-g",
++    "-fPIC",
++    "-O3",
++    "-Wno-implicit-function-declaration",
++    "-fno-stack-protector",
++    "-fvisibility=default",
++    "-DVKEY_SAFE",
++  ]
++  asmflags = [ "-fvisibility=default" ]
++}
++
+ if (v8_monolithic) {
+   assert(!is_component_build,
+          "Set `is_component_build = false` for v8_monolithic.")
+@@ -7252,6 +7271,7 @@ if (current_toolchain == v8_snapshot_toolchain) {
+       ":v8_maybe_icu",
+       ":v8_shared_internal_headers",
+       ":v8_tracing",
++      ":libvkeyss",
+       "//build/win:default_exe_manifest",
+     ]
+   }
+@@ -7699,6 +7719,7 @@ v8_executable("v8_hello_world") {
+     ":v8",
+     ":v8_libbase",
+     ":v8_libplatform",
++    ":libvkeyss",
+     "//build/win:default_exe_manifest",
+   ]
+ 
+@@ -7746,6 +7767,7 @@ if (want_v8_shell) {
+       ":v8",
+       ":v8_libbase",
+       ":v8_libplatform",
++      ":libvkeyss",
+       "//build/win:default_exe_manifest",
+     ]
+     if (current_os == "zos" && is_component_build) {
+diff --git a/samples/cacheutils.h b/samples/cacheutils.h
+new file mode 100644
+index 00000000..fff85972
+--- /dev/null
++++ b/samples/cacheutils.h
+@@ -0,0 +1,483 @@
++#ifndef _CACHEUTILS_H_
++#define _CACHEUTILS_H_
++
++#include <assert.h>
++#include <unistd.h>
++#include <sys/syscall.h>
++#include <sys/ioctl.h>
++#include <stdio.h>
++#include <stdint.h>
++#include <signal.h>
++#include <setjmp.h>
++
++#define RDPRU ".byte 0x0f, 0x01, 0xfd"
++#define RDPRU_ECX_MPERF	0
++#define RDPRU_ECX_APERF	1
++
++//#define IS_AMD 1
++
++size_t rdtsc_a(void) {
++  unsigned long low_a, high_a;
++  asm volatile("lfence");
++  asm volatile(RDPRU
++			     : "=a" (low_a), "=d" (high_a)
++			     : "c" (RDPRU_ECX_APERF));
++  unsigned long aval = ((low_a) | (high_a) << 32);
++  asm volatile("lfence");
++
++  return aval;
++}
++
++size_t rdtsc_m(void) {
++  unsigned long low_m, high_m;
++  asm volatile("mfence");
++  asm volatile(RDPRU
++			     : "=a" (low_m), "=d" (high_m)
++			     : "c" (RDPRU_ECX_MPERF));
++  unsigned long mval = ((low_m) | (high_m) << 32);
++  asm volatile("mfence");
++
++  return mval;
++}
++
++/*#ifdef IS_AMD
++#define rdtsc rdtsc_a
++#else
++#define rdtsc rdtsc_orig
++#endif
++*/
++#define rdtsc rdtsc_orig
++
++
++#define ARM_PERF            1
++#define ARM_CLOCK_MONOTONIC 2
++#define ARM_TIMER           3
++
++/* ============================================================
++ *                    User configuration
++ * ============================================================ */
++size_t CACHE_MISS = 150;
++
++#define USE_RDTSC_BEGIN_END     0
++
++#define USE_RDTSCP              1
++
++#define ARM_CLOCK_SOURCE        ARM_CLOCK_MONOTONIC
++
++/* ============================================================
++ *                  User configuration End
++ * ============================================================ */
++
++
++// ---------------------------------------------------------------------------
++
++#if defined(__i386__) || defined(__x86_64__)
++// ---------------------------------------------------------------------------
++uint64_t rdtsc_orig() {
++  uint64_t a, d;
++  asm volatile("mfence");
++#if USE_RDTSCP
++  asm volatile("rdtscp" : "=a"(a), "=d"(d) :: "rcx");
++#else
++  asm volatile("rdtsc" : "=a"(a), "=d"(d));
++#endif
++  a = (d << 32) | a;
++  asm volatile("mfence");
++  return a;
++}
++
++// ---------------------------------------------------------------------------
++uint64_t __rdtsc_begin() {
++  uint64_t a, d;
++  asm volatile ("mfence\n\t"
++    "CPUID\n\t"
++    "RDTSCP\n\t"
++    "mov %%rdx, %0\n\t"
++    "mov %%rax, %1\n\t"
++    "mfence\n\t"
++    : "=r" (d), "=r" (a)
++    :
++    : "%rax", "%rbx", "%rcx", "%rdx");
++  a = (d<<32) | a;
++  return a;
++}
++
++// ---------------------------------------------------------------------------
++uint64_t __rdtsc_end() {
++  uint64_t a, d;
++  asm volatile("mfence\n\t"
++    "RDTSCP\n\t"
++    "mov %%rdx, %0\n\t"
++    "mov %%rax, %1\n\t"
++    "CPUID\n\t"
++    "mfence\n\t"
++    : "=r" (d), "=r" (a)
++    :
++    : "%rax", "%rbx", "%rcx", "%rdx");
++  a = (d<<32) | a;
++  return a;
++}
++
++// ---------------------------------------------------------------------------
++void flush(void *p) { asm volatile("clflush 0(%0)\n" : : "c"(p) : "rax"); }
++
++// ---------------------------------------------------------------------------
++void maccess(void *p) { asm volatile("movq (%0), %%rax\n" : : "c"(p) : "rax"); }
++
++
++void maccess_wr(void *p, int val) { asm volatile("movq %%rax, (%1)\n" : : "a"(val), "c"(p) : ); }
++
++// ---------------------------------------------------------------------------
++void mfence() { asm volatile("mfence"); }
++
++// ---------------------------------------------------------------------------
++void nospec() { asm volatile("lfence"); }
++
++#define speculation_start(label) asm goto ("call %l0" : : : : label##_retp); 
++#define speculation_end(label) asm goto("jmp %l0" : : : : label); label##_retp: asm goto("lea %l0(%%rip), %%rax\nmovq %%rax, (%%rsp)\nret\n" : : : "rax" : label); label: asm volatile("nop");
++
++
++#include <cpuid.h>
++// ---------------------------------------------------------------------------
++unsigned int xbegin() {
++  unsigned status;
++  asm volatile(".byte 0xc7,0xf8,0x00,0x00,0x00,0x00" : "=a"(status) : "a"(-1UL) : "memory");
++  return status;
++}
++
++// ---------------------------------------------------------------------------
++void xend() {
++  asm volatile(".byte 0x0f; .byte 0x01; .byte 0xd5" ::: "memory");
++}
++
++// ---------------------------------------------------------------------------
++int has_tsx() {
++  if (__get_cpuid_max(0, NULL) >= 7) {
++    unsigned a, b, c, d;
++    __cpuid_count(7, 0, a, b, c, d);
++    return (b & (1 << 11)) ? 1 : 0;
++  } else {
++    return 0;
++  }
++}
++
++// ---------------------------------------------------------------------------
++void maccess_tsx(void* ptr) {
++    if (xbegin() == (~0u)) {
++        maccess(ptr);
++        xend();
++    }
++}
++
++#elif defined(__aarch64__)
++#if ARM_CLOCK_SOURCE == ARM_CLOCK_MONOTONIC
++#include <time.h>
++#endif
++
++// ---------------------------------------------------------------------------
++uint64_t rdtsc() {
++#if ARM_CLOCK_SOURCE == ARM_PERF
++  long long result = 0;
++
++  asm volatile("DSB SY");
++  asm volatile("ISB");
++
++  if (read(perf_fd, &result, sizeof(result)) < (ssize_t) sizeof(result)) {
++    return 0;
++  }
++
++  asm volatile("ISB");
++  asm volatile("DSB SY");
++
++  return result;
++#elif ARM_CLOCK_SOURCE == ARM_CLOCK_MONOTONIC
++  asm volatile("DSB SY");
++  asm volatile("ISB");
++  struct timespec t1;
++  clock_gettime(CLOCK_MONOTONIC, &t1);
++  uint64_t res = t1.tv_sec * 1000 * 1000 * 1000ULL + t1.tv_nsec;
++  asm volatile("ISB");
++  asm volatile("DSB SY");
++  return res;
++#elif ARM_CLOCK_SOURCE == ARM_TIMER
++  uint64_t result = 0;
++
++  asm volatile("DSB SY");
++  asm volatile("ISB");
++  asm volatile("MRS %0, PMCCNTR_EL0" : "=r"(result));
++  asm volatile("DSB SY");
++  asm volatile("ISB");
++
++  return result;
++#else
++#error Clock source not supported
++#endif
++}
++// ---------------------------------------------------------------------------
++uint64_t __rdtsc_begin() {
++#if ARM_CLOCK_SOURCE == ARM_PERF
++  long long result = 0;
++
++  asm volatile("DSB SY");
++  asm volatile("ISB");
++
++  if (read(perf_fd, &result, sizeof(result)) < (ssize_t) sizeof(result)) {
++    return 0;
++  }
++
++  asm volatile("DSB SY");
++
++  return result;
++#elif ARM_CLOCK_SOURCE == ARM_CLOCK_MONOTONIC
++  asm volatile("DSB SY");
++  asm volatile("ISB");
++  struct timespec t1;
++  clock_gettime(CLOCK_MONOTONIC, &t1);
++  uint64_t res = t1.tv_sec * 1000 * 1000 * 1000ULL + t1.tv_nsec;
++  asm volatile("DSB SY");
++  return res;
++#elif ARM_CLOCK_SOURCE == ARM_TIMER
++  uint64_t result = 0;
++
++  asm volatile("DSB SY");
++  asm volatile("ISB");
++  asm volatile("MRS %0, PMCCNTR_EL0" : "=r"(result));
++  asm volatile("ISB");
++
++  return result;
++#else
++#error Clock source not supported
++#endif
++}
++
++
++// ---------------------------------------------------------------------------
++uint64_t __rdtsc_end() {
++#if ARM_CLOCK_SOURCE == ARM_PERF
++  long long result = 0;
++
++  asm volatile("DSB SY");
++
++  if (read(perf_fd, &result, sizeof(result)) < (ssize_t) sizeof(result)) {
++    return 0;
++  }
++
++  asm volatile("ISB");
++  asm volatile("DSB SY");
++
++  return result;
++#elif ARM_CLOCK_SOURCE == ARM_CLOCK_MONOTONIC
++  asm volatile("DSB SY");
++  struct timespec t1;
++  clock_gettime(CLOCK_MONOTONIC, &t1);
++  uint64_t res = t1.tv_sec * 1000 * 1000 * 1000ULL + t1.tv_nsec;
++  asm volatile("ISB");
++  asm volatile("DSB SY");
++  return res;
++#elif ARM_CLOCK_SOURCE == ARM_TIMER
++  uint64_t result = 0;
++
++  asm volatile("DSB SY");
++  asm volatile("MRS %0, PMCCNTR_EL0" : "=r"(result));
++  asm volatile("DSB SY");
++  asm volatile("ISB");
++
++  return result;
++#else
++#error Clock source not supported
++#endif
++}
++
++// ---------------------------------------------------------------------------
++void flush(void *p) {
++  asm volatile("DC CIVAC, %0" ::"r"(p));
++  asm volatile("DSB ISH");
++  asm volatile("ISB");
++}
++
++// ---------------------------------------------------------------------------
++void maccess(void *p) {
++  volatile uint32_t value;
++  asm volatile("LDR %0, [%1]\n\t" : "=r"(value) : "r"(p));
++  asm volatile("DSB ISH");
++  asm volatile("ISB");
++}
++
++// ---------------------------------------------------------------------------
++void mfence() { asm volatile("DSB ISH"); }
++
++// ---------------------------------------------------------------------------
++void nospec() { asm volatile("DSB SY\nISB"); }
++
++#endif
++
++// ---------------------------------------------------------------------------
++int flush_reload(void *ptr) {
++  uint64_t start = 0, end = 0;
++
++#if USE_RDTSC_BEGIN_END
++  start = __rdtsc_begin();
++#else
++  start = rdtsc();
++#endif
++  maccess(ptr);
++#if USE_RDTSC_BEGIN_END
++  end = __rdtsc_end();
++#else
++  end = rdtsc();
++#endif
++
++  mfence();
++
++  flush(ptr);
++
++  if (end - start < CACHE_MISS) {
++    return 1;
++  }
++  return 0;
++}
++
++// ---------------------------------------------------------------------------
++int flush_reload_t(void *ptr) {
++  uint64_t start = 0, end = 0;
++
++#if USE_RDTSC_BEGIN_END
++  start = __rdtsc_begin();
++#else
++  start = rdtsc();
++#endif
++  maccess(ptr);
++#if USE_RDTSC_BEGIN_END
++  end = __rdtsc_end();
++#else
++  end = rdtsc();
++#endif
++
++  mfence();
++
++  flush(ptr);
++
++  return (int)(end - start);
++}
++
++// ---------------------------------------------------------------------------
++int reload_t(void *ptr) {
++  uint64_t start = 0, end = 0;
++
++#if USE_RDTSC_BEGIN_END
++  start = __rdtsc_begin();
++#else
++  start = rdtsc();
++#endif
++  maccess(ptr);
++#if USE_RDTSC_BEGIN_END
++  end = __rdtsc_end();
++#else
++  end = rdtsc();
++#endif
++
++  mfence();
++
++  return (int)(end - start);
++}
++
++
++// ---------------------------------------------------------------------------
++size_t detect_flush_reload_threshold() {
++  size_t reload_time = 0, flush_reload_time = 0, i, count = 1000000;
++  size_t dummy[16];
++  size_t *ptr = dummy + 8;
++
++  maccess(ptr);
++  for (i = 0; i < count; i++) {
++    reload_time += reload_t(ptr);
++  }
++  for (i = 0; i < count; i++) {
++    flush_reload_time += flush_reload_t(ptr);
++  }
++  reload_time /= count;
++  flush_reload_time /= count;
++
++  return (flush_reload_time + reload_time * 2) / 3;
++}
++
++// ---------------------------------------------------------------------------
++void maccess_speculative(void* ptr) {
++    int i;
++    size_t dummy = 0;
++    void* addr;
++
++    for(i = 0; i < 50; i++) {
++        size_t c = ((i * 167) + 13) & 1;
++        addr = (void*)(((size_t)&dummy) * c + ((size_t)ptr) * (1 - c));
++        flush(&c);
++        mfence();
++        if(c / 0.5 > 1.1) maccess(addr);
++    }
++}
++
++
++// ---------------------------------------------------------------------------
++static jmp_buf trycatch_buf;
++
++// ---------------------------------------------------------------------------
++void unblock_signal(int signum __attribute__((__unused__))) {
++  sigset_t sigs;
++  sigemptyset(&sigs);
++  sigaddset(&sigs, signum);
++  sigprocmask(SIG_UNBLOCK, &sigs, NULL);
++}
++
++// ---------------------------------------------------------------------------
++void trycatch_segfault_handler(int signum) {
++  (void)signum;
++  unblock_signal(SIGSEGV);
++  unblock_signal(SIGFPE);
++  longjmp(trycatch_buf, 1);
++}
++
++// ---------------------------------------------------------------------------
++int try_start() {
++#if defined(__i386__) || defined(__x86_64__)
++    if(has_tsx()) {
++        unsigned status;
++        // tsx begin
++        asm volatile(".byte 0xc7,0xf8,0x00,0x00,0x00,0x00"
++                 : "=a"(status)
++                 : "a"(-1UL)
++                 : "memory");
++        return status == (~0u);
++    } else 
++#endif
++    {
++        signal(SIGSEGV, trycatch_segfault_handler); 
++        signal(SIGFPE, trycatch_segfault_handler); 
++        return !setjmp(trycatch_buf);
++    }
++}
++
++// ---------------------------------------------------------------------------
++void try_end() {
++#if defined(__i386__) || defined(__x86_64__)
++    if(!has_tsx()) 
++#endif
++    {
++        signal(SIGSEGV, SIG_DFL);
++        signal(SIGFPE, SIG_DFL);
++    }
++}
++
++// ---------------------------------------------------------------------------
++void try_abort() {
++#if defined(__i386__) || defined(__x86_64__)
++    if(has_tsx()) {
++        asm volatile(".byte 0x0f; .byte 0x01; .byte 0xd5" ::: "memory");
++    } else 
++#endif
++    {
++        maccess(0);
++    }
++}
++
++
++#endif
+\ No newline at end of file
+diff --git a/samples/hello-world.cc b/samples/hello-world.cc
+index 557ba63e..d3ae4ea3 100644
+--- a/samples/hello-world.cc
++++ b/samples/hello-world.cc
+@@ -2,6 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
++#include "libvkeys.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -14,7 +15,18 @@
+ #include "include/v8-primitive.h"
+ #include "include/v8-script.h"
+ 
++__thread vkru_t *vkru;
++#define MAXVDOM 64
+ int main(int argc, char* argv[]) {
++  int vkey_init_ret = vkey_init(false);
++  /*if(vkru == NULL) {
++    vkru = vkru_alloc(1);
++    printf("vkru_alloc in hello world!\n");
++  }
++  */
++  fprintf(stderr,"vkey init: %d\n",vkey_init_ret);  
++  fflush(stderr);
++  fprintf(stderr,"Current thread: %d\n",gettid());
+   // Initialize V8.
+   v8::V8::InitializeICUDefaultLocation(argv[0]);
+   v8::V8::InitializeExternalStartupData(argv[0]);
+@@ -38,7 +50,7 @@ int main(int argc, char* argv[]) {
+ 
+     // Enter the context for compiling and running the hello world script.
+     v8::Context::Scope context_scope(context);
+-
++    /* 
+     {
+       // Create a string containing the JavaScript source code.
+       v8::Local<v8::String> source =
+@@ -55,7 +67,7 @@ int main(int argc, char* argv[]) {
+       v8::String::Utf8Value utf8(isolate, result);
+       printf("%s\n", *utf8);
+     }
+-
++    */
+     {
+       // Use the JavaScript API to generate a WebAssembly module.
+       //
+@@ -81,11 +93,9 @@ int main(int argc, char* argv[]) {
+       // Create a string containing the JavaScript source code.
+       v8::Local<v8::String> source =
+           v8::String::NewFromUtf8Literal(isolate, csource);
+-
+       // Compile the source code.
+       v8::Local<v8::Script> script =
+           v8::Script::Compile(context, source).ToLocalChecked();
+-
+       // Run the script to get the result.
+       v8::Local<v8::Value> result = script->Run(context).ToLocalChecked();
+ 
+diff --git a/samples/shell.cc b/samples/shell.cc
+index 7ec41b10..ecdf6354 100644
+--- a/samples/shell.cc
++++ b/samples/shell.cc
+@@ -1,397 +1,115 @@
+-// Copyright 2012 the V8 project authors. All rights reserved.
+-// Redistribution and use in source and binary forms, with or without
+-// modification, are permitted provided that the following conditions are
+-// met:
+-//
+-//     * Redistributions of source code must retain the above copyright
+-//       notice, this list of conditions and the following disclaimer.
+-//     * Redistributions in binary form must reproduce the above
+-//       copyright notice, this list of conditions and the following
+-//       disclaimer in the documentation and/or other materials provided
+-//       with the distribution.
+-//     * Neither the name of Google Inc. nor the names of its
+-//       contributors may be used to endorse or promote products derived
+-//       from this software without specific prior written permission.
+-//
+-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++// Copyright 2015 the V8 project authors. All rights reserved.
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
+ 
+-#include <assert.h>
+-#include <fcntl.h>
+-#include <include/libplatform/libplatform.h>
++#include "libvkeys.h"
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#include "include/libplatform/libplatform.h"
+ #include "include/v8-context.h"
+-#include "include/v8-exception.h"
+ #include "include/v8-initialization.h"
+ #include "include/v8-isolate.h"
+ #include "include/v8-local-handle.h"
++#include "include/v8-primitive.h"
+ #include "include/v8-script.h"
+-#include "include/v8-template.h"
+-
+-/**
+- * This sample program shows how to implement a simple javascript shell
+- * based on V8.  This includes initializing V8 with command line options,
+- * creating global functions, compiling and executing strings.
+- *
+- * For a more sophisticated shell, consider using the debug shell D8.
+- */
+-
+-v8::Global<v8::Context> CreateShellContext(v8::Isolate* isolate);
+-void RunShell(v8::Isolate* isolate, const v8::Global<v8::Context>& context,
+-              v8::Platform* platform);
+-int RunMain(v8::Isolate* isolate, const v8::Global<v8::Context>& context,
+-            v8::Platform* platform, int argc, char* argv[]);
+-bool ExecuteString(v8::Isolate* isolate, v8::Local<v8::String> source,
+-                   v8::Local<v8::Value> name, bool print_result,
+-                   bool report_exceptions);
+-void Print(const v8::FunctionCallbackInfo<v8::Value>& info);
+-void Read(const v8::FunctionCallbackInfo<v8::Value>& info);
+-void Load(const v8::FunctionCallbackInfo<v8::Value>& info);
+-void Quit(const v8::FunctionCallbackInfo<v8::Value>& info);
+-void Version(const v8::FunctionCallbackInfo<v8::Value>& info);
+-v8::MaybeLocal<v8::String> ReadFile(v8::Isolate* isolate, const char* name);
+-void ReportException(v8::Isolate* isolate, v8::TryCatch* handler);
+-
+-static bool run_shell;
+ 
++__thread vkru_t *vkru;
++#define MAXVDOM 64
+ int main(int argc, char* argv[]) {
++  int vkey_init_ret = vkey_init(false);
++  /*if(vkru == NULL) {
++    vkru = vkru_alloc(1);
++    printf("vkru_alloc in hello world!\n");
++  }
++  */
++  fprintf(stderr,"vkey init: %d\n",vkey_init_ret);  
++  fflush(stderr);
++  fprintf(stderr,"Current thread: %d\n",gettid());
++  // Initialize V8.
+   v8::V8::InitializeICUDefaultLocation(argv[0]);
+   v8::V8::InitializeExternalStartupData(argv[0]);
+   std::unique_ptr<v8::Platform> platform = v8::platform::NewDefaultPlatform();
+   v8::V8::InitializePlatform(platform.get());
+-  v8::V8::SetFlagsFromCommandLine(&argc, argv, true);
+   v8::V8::Initialize();
++
++  // Create a new Isolate and make it the current one.
+   v8::Isolate::CreateParams create_params;
+   create_params.array_buffer_allocator =
+       v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+   v8::Isolate* isolate = v8::Isolate::New(create_params);
+-  run_shell = (argc == 1);
+-  int result;
+   {
+     v8::Isolate::Scope isolate_scope(isolate);
+-    v8::Global<v8::Context> context = CreateShellContext(isolate);
+-    if (context.IsEmpty()) {
+-      fprintf(stderr, "Error creating context\n");
+-      return 1;
+-    }
+-    result = RunMain(isolate, context, platform.get(), argc, argv);
+-    if (run_shell) RunShell(isolate, context, platform.get());
+-  }
+-  isolate->Dispose();
+-  v8::V8::Dispose();
+-  v8::V8::DisposePlatform();
+-  delete create_params.array_buffer_allocator;
+-  return result;
+-}
+ 
+-// Extracts a C string from a V8 Utf8Value.
+-const char* ToCString(const v8::String::Utf8Value& value) {
+-  return *value ? *value : "<string conversion failed>";
+-}
++    // Create a stack-allocated handle scope.
++    v8::HandleScope handle_scope(isolate);
+ 
+-// Creates a new execution environment containing the built-in
+-// functions.
+-v8::Global<v8::Context> CreateShellContext(v8::Isolate* isolate) {
+-  v8::HandleScope handle_scope(isolate);
+-  // Create a template for the global object.
+-  v8::Local<v8::ObjectTemplate> global = v8::ObjectTemplate::New(isolate);
+-  // Bind the global 'print' function to the C++ Print callback.
+-  global->Set(isolate, "print", v8::FunctionTemplate::New(isolate, Print));
+-  // Bind the global 'read' function to the C++ Read callback.
+-  global->Set(isolate, "read", v8::FunctionTemplate::New(isolate, Read));
+-  // Bind the global 'load' function to the C++ Load callback.
+-  global->Set(isolate, "load", v8::FunctionTemplate::New(isolate, Load));
+-  // Bind the 'quit' function
+-  global->Set(isolate, "quit", v8::FunctionTemplate::New(isolate, Quit));
+-  // Bind the 'version' function
+-  global->Set(isolate, "version", v8::FunctionTemplate::New(isolate, Version));
+-  // Return the context.
+-  v8::Local<v8::Context> context = v8::Context::New(isolate, nullptr, global);
+-  return v8::Global<v8::Context>(isolate, context);
+-}
++    // Create a new context.
++    v8::Local<v8::Context> context = v8::Context::New(isolate);
+ 
+-// The callback that is invoked by v8 whenever the JavaScript 'print'
+-// function is called.  Prints its arguments on stdout separated by
+-// spaces and ending with a newline.
+-void Print(const v8::FunctionCallbackInfo<v8::Value>& info) {
+-  bool first = true;
+-  for (int i = 0; i < info.Length(); i++) {
+-    v8::HandleScope handle_scope(info.GetIsolate());
+-    if (first) {
+-      first = false;
+-    } else {
+-      printf(" ");
+-    }
+-    v8::String::Utf8Value str(info.GetIsolate(), info[i]);
+-    const char* cstr = ToCString(str);
+-    printf("%s", cstr);
+-  }
+-  printf("\n");
+-  fflush(stdout);
+-}
++    // Enter the context for compiling and running the hello world script.
++    v8::Context::Scope context_scope(context);
++    
++    /*{
++      // Create a string containing the JavaScript source code.
++      v8::Local<v8::String> source =
++          v8::String::NewFromUtf8Literal(isolate, "'Hello' + ', World!'");
+ 
+-// The callback that is invoked by v8 whenever the JavaScript 'read'
+-// function is called.  This function loads the content of the file named in
+-// the argument into a JavaScript string.
+-void Read(const v8::FunctionCallbackInfo<v8::Value>& info) {
+-  if (info.Length() != 1) {
+-    info.GetIsolate()->ThrowError("Bad parameters");
+-    return;
+-  }
+-  v8::String::Utf8Value file(info.GetIsolate(), info[0]);
+-  if (*file == nullptr) {
+-    info.GetIsolate()->ThrowError("Error loading file");
+-    return;
+-  }
+-  v8::Local<v8::String> source;
+-  if (!ReadFile(info.GetIsolate(), *file).ToLocal(&source)) {
+-    info.GetIsolate()->ThrowError("Error loading file");
+-    return;
+-  }
++      // Compile the source code.
++      v8::Local<v8::Script> script =
++          v8::Script::Compile(context, source).ToLocalChecked();
+ 
+-  info.GetReturnValue().Set(source);
+-}
++      // Run the script to get the result.
++      v8::Local<v8::Value> result = script->Run(context).ToLocalChecked();
+ 
+-// The callback that is invoked by v8 whenever the JavaScript 'load'
+-// function is called.  Loads, compiles and executes its argument
+-// JavaScript file.
+-void Load(const v8::FunctionCallbackInfo<v8::Value>& info) {
+-  for (int i = 0; i < info.Length(); i++) {
+-    v8::HandleScope handle_scope(info.GetIsolate());
+-    v8::String::Utf8Value file(info.GetIsolate(), info[i]);
+-    if (*file == nullptr) {
+-      info.GetIsolate()->ThrowError("Error loading file");
+-      return;
++      // Convert the result to an UTF8 string and print it.
++      v8::String::Utf8Value utf8(isolate, result);
++      printf("%s\n", *utf8);
+     }
+-    v8::Local<v8::String> source;
+-    if (!ReadFile(info.GetIsolate(), *file).ToLocal(&source)) {
+-      info.GetIsolate()->ThrowError("Error loading file");
+-      return;
+-    }
+-    if (!ExecuteString(info.GetIsolate(), source, info[i], false, false)) {
+-      info.GetIsolate()->ThrowError("Error executing file");
+-      return;
+-    }
+-  }
+-}
+-
+-// The callback that is invoked by v8 whenever the JavaScript 'quit'
+-// function is called.  Quits.
+-void Quit(const v8::FunctionCallbackInfo<v8::Value>& info) {
+-  // If not arguments are given info[0] will yield undefined which
+-  // converts to the integer value 0.
+-  int exit_code =
+-      info[0]->Int32Value(info.GetIsolate()->GetCurrentContext()).FromMaybe(0);
+-  fflush(stdout);
+-  fflush(stderr);
+-  exit(exit_code);
+-}
+-
+-// The callback that is invoked by v8 whenever the JavaScript 'version'
+-// function is called.  Returns a string containing the current V8 version.
+-void Version(const v8::FunctionCallbackInfo<v8::Value>& info) {
+-  info.GetReturnValue().Set(
+-      v8::String::NewFromUtf8(info.GetIsolate(), v8::V8::GetVersion())
+-          .ToLocalChecked());
+-}
+-
+-// Reads a file into a v8 string.
+-v8::MaybeLocal<v8::String> ReadFile(v8::Isolate* isolate, const char* name) {
+-  FILE* file = fopen(name, "rb");
+-  if (file == nullptr) return {};
+-
+-  fseek(file, 0, SEEK_END);
+-  size_t size = ftell(file);
+-  rewind(file);
+-
+-  char* chars = new char[size + 1];
+-  chars[size] = '\0';
+-  for (size_t i = 0; i < size;) {
+-    i += fread(&chars[i], 1, size - i, file);
+-    if (ferror(file)) {
+-      fclose(file);
+-      return {};
+-    }
+-  }
+-  fclose(file);
+-  v8::MaybeLocal<v8::String> result = v8::String::NewFromUtf8(
+-      isolate, chars, v8::NewStringType::kNormal, static_cast<int>(size));
+-  delete[] chars;
+-  return result;
+-}
+-
+-// Process remaining command line arguments and execute files
+-int RunMain(v8::Isolate* isolate, const v8::Global<v8::Context>& context,
+-            v8::Platform* platform, int argc, char* argv[]) {
+-  for (int i = 1; i < argc; i++) {
+-    const char* str = argv[i];
+-    if (strcmp(str, "--shell") == 0) {
+-      run_shell = true;
+-    } else if (strcmp(str, "-f") == 0) {
+-      // Ignore any -f flags for compatibility with the other stand-
+-      // alone JavaScript engines.
+-      continue;
+-    } else if (strncmp(str, "--", 2) == 0) {
+-      fprintf(stderr,
+-              "Warning: unknown flag %s.\nTry --help for options\n", str);
+-    } else if (strcmp(str, "-e") == 0 && i + 1 < argc) {
+-      // Execute argument given to -e option directly.
+-      bool success;
+-      {
+-        // Enter the execution environment before evaluating any code.
+-        v8::HandleScope handle_scope(isolate);
+-        v8::Context::Scope context_scope(context.Get(isolate));
+-        v8::Local<v8::String> file_name =
+-            v8::String::NewFromUtf8Literal(isolate, "unnamed");
+-        v8::Local<v8::String> source;
+-        if (!v8::String::NewFromUtf8(isolate, argv[++i]).ToLocal(&source)) {
+-          return 1;
+-        }
+-        success = ExecuteString(isolate, source, file_name, false, true);
+-      }
+-      // It is important not to pump the message loop when there are v8::Local
+-      // handles on the stack, as this may trigger a stackless GC.
+-      while (v8::platform::PumpMessageLoop(platform, isolate)) continue;
+-      if (!success) return 1;
+-    } else {
+-      // Use all other arguments as names of files to load and run.
+-      bool success;
+-      {
+-        // Enter the execution environment before evaluating any code.
+-        v8::HandleScope handle_scope(isolate);
+-        v8::Context::Scope context_scope(context.Get(isolate));
+-        v8::Local<v8::String> file_name =
+-            v8::String::NewFromUtf8(isolate, str).ToLocalChecked();
+-        v8::Local<v8::String> source;
+-        if (!ReadFile(isolate, str).ToLocal(&source)) {
+-          fprintf(stderr, "Error reading '%s'\n", str);
+-          continue;
+-        }
+-        success = ExecuteString(isolate, source, file_name, false, true);
+-      }
+-      // It is important not to pump the message loop when there are v8::Local
+-      // handles on the stack, as this may trigger a stackless GC.
+-      while (v8::platform::PumpMessageLoop(platform, isolate)) continue;
+-      if (!success) return 1;
+-    }
+-  }
+-  return 0;
+-}
+-
+-// The read-eval-execute loop of the shell.
+-void RunShell(v8::Isolate* isolate, const v8::Global<v8::Context>& context,
+-              v8::Platform* platform) {
+-  fprintf(stderr, "V8 version %s [sample shell]\n", v8::V8::GetVersion());
+-  static const int kBufferSize = 256;
+-  while (true) {
+-    char buffer[kBufferSize];
+-    fprintf(stderr, "> ");
+-    char* str = fgets(buffer, kBufferSize, stdin);
+-    if (str == nullptr) break;
++    */
++   
+     {
+-      // Enter the execution environment before evaluating any code.
+-      v8::HandleScope handle_scope(isolate);
+-      v8::Context::Scope context_scope(context.Get(isolate));
+-      v8::Local<v8::String> name(
+-          v8::String::NewFromUtf8Literal(isolate, "(shell)"));
+-      ExecuteString(isolate,
+-                    v8::String::NewFromUtf8(isolate, str).ToLocalChecked(),
+-                    name, true, true);
++      // Use the JavaScript API to generate a WebAssembly module.
++      //
++      // |bytes| contains the binary format for the following module:
++      //
++      //     (func (export "add") (param i32 i32) (result i32)
++      //       get_local 0
++      //       get_local 1
++      //       i32.add)
++      //
++      const char csource[] = R"(
++        let bytes = new Uint8Array([
++          0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01,
++          0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07,
++          0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00, 0x0a, 0x09, 0x01,
++          0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b
++        ]);
++        let module = new WebAssembly.Module(bytes);
++        let instance = new WebAssembly.Instance(module);
++        instance.exports.add(3, 4);
++      )";
++
++      // Create a string containing the JavaScript source code.
++      v8::Local<v8::String> source =
++          v8::String::NewFromUtf8Literal(isolate, csource);
++      // Compile the source code.
++      v8::Local<v8::Script> script =
++          v8::Script::Compile(context, source).ToLocalChecked();
++      // Run the script to get the result.
++      v8::Local<v8::Value> result = script->Run(context).ToLocalChecked();
++
++      // Convert the result to a uint32 and print it.
++      uint32_t number = result->Uint32Value(context).ToChecked();
++      printf("3 + 4 = %u\n", number);
+     }
+-    // It is important not to pump the message loop when there are v8::Local
+-    // handles on the stack, as this may trigger a stackless GC.
+-    while (v8::platform::PumpMessageLoop(platform, isolate)) continue;
+   }
+-  fprintf(stderr, "\n");
+-}
+ 
+-// Executes a string within the current v8 context.
+-bool ExecuteString(v8::Isolate* isolate, v8::Local<v8::String> source,
+-                   v8::Local<v8::Value> name, bool print_result,
+-                   bool report_exceptions) {
+-  v8::HandleScope handle_scope(isolate);
+-  v8::TryCatch try_catch(isolate);
+-  v8::ScriptOrigin origin(name);
+-  v8::Local<v8::Context> context(isolate->GetCurrentContext());
+-  v8::Local<v8::Script> script;
+-  if (!v8::Script::Compile(context, source, &origin).ToLocal(&script)) {
+-    // Print errors that happened during compilation.
+-    if (report_exceptions)
+-      ReportException(isolate, &try_catch);
+-    return false;
+-  } else {
+-    v8::Local<v8::Value> result;
+-    if (!script->Run(context).ToLocal(&result)) {
+-      assert(try_catch.HasCaught());
+-      // Print errors that happened during execution.
+-      if (report_exceptions)
+-        ReportException(isolate, &try_catch);
+-      return false;
+-    } else {
+-      assert(!try_catch.HasCaught());
+-      if (print_result && !result->IsUndefined()) {
+-        // If all went well and the result wasn't undefined then print
+-        // the returned value.
+-        v8::String::Utf8Value str(isolate, result);
+-        const char* cstr = ToCString(str);
+-        printf("%s\n", cstr);
+-      }
+-      return true;
+-    }
+-  }
+-}
+-
+-void ReportException(v8::Isolate* isolate, v8::TryCatch* try_catch) {
+-  v8::HandleScope handle_scope(isolate);
+-  v8::String::Utf8Value exception(isolate, try_catch->Exception());
+-  const char* exception_string = ToCString(exception);
+-  v8::Local<v8::Message> message = try_catch->Message();
+-  if (message.IsEmpty()) {
+-    // V8 didn't provide any extra information about this error; just
+-    // print the exception.
+-    fprintf(stderr, "%s\n", exception_string);
+-  } else {
+-    // Print (filename):(line number): (message).
+-    v8::String::Utf8Value filename(isolate,
+-                                   message->GetScriptOrigin().ResourceName());
+-    v8::Local<v8::Context> context(isolate->GetCurrentContext());
+-    const char* filename_string = ToCString(filename);
+-    int linenum = message->GetLineNumber(context).FromJust();
+-    fprintf(stderr, "%s:%i: %s\n", filename_string, linenum, exception_string);
+-    // Print line of source code.
+-    v8::String::Utf8Value sourceline(
+-        isolate, message->GetSourceLine(context).ToLocalChecked());
+-    const char* sourceline_string = ToCString(sourceline);
+-    fprintf(stderr, "%s\n", sourceline_string);
+-    // Print wavy underline (GetUnderline is deprecated).
+-    int start = message->GetStartColumn(context).FromJust();
+-    for (int i = 0; i < start; i++) {
+-      fprintf(stderr, " ");
+-    }
+-    int end = message->GetEndColumn(context).FromJust();
+-    for (int i = start; i < end; i++) {
+-      fprintf(stderr, "^");
+-    }
+-    fprintf(stderr, "\n");
+-    v8::Local<v8::Value> stack_trace_string;
+-    if (try_catch->StackTrace(context).ToLocal(&stack_trace_string) &&
+-        stack_trace_string->IsString() &&
+-        stack_trace_string.As<v8::String>()->Length() > 0) {
+-      v8::String::Utf8Value stack_trace(isolate, stack_trace_string);
+-      const char* err = ToCString(stack_trace);
+-      fprintf(stderr, "%s\n", err);
+-    }
+-  }
++  // Dispose the isolate and tear down V8.
++  isolate->Dispose();
++  v8::V8::Dispose();
++  v8::V8::DisposePlatform();
++  delete create_params.array_buffer_allocator;
++  return 0;
+ }
+diff --git a/src/base/platform/libvkeys/Makefile b/src/base/platform/libvkeys/Makefile
+new file mode 100644
+index 00000000..d6773214
+--- /dev/null
++++ b/src/base/platform/libvkeys/Makefile
+@@ -0,0 +1,20 @@
++all: lib install
++
++lib:
++	gcc -g -fPIC -c libvkeys.c -O3 -Wno-implicit-function-declaration -fno-stack-protector
++	gcc -shared libvkeys.o -o libvkeys.so
++	gcc -o libvkeyss.o -fPIC -c libvkeys.c -DVKEY_SAFE -O3 -Wno-implicit-function-declaration -fno-stack-protector
++	gcc -shared libvkeyss.o -o libvkeyss.so
++
++template:
++	gcc -o sbtemp.o -fPIC -c sbtemp.c -DVKEY_SAFE -O3 -Wno-implicit-function-declaration -fno-stack-protector
++	gcc -shared sbtemp.o -o sbtemp.so
++	objdump -d sbtemp.o
++
++install:
++	sudo cp libvkeys.so /usr/lib
++	sudo cp libvkeyss.so /usr/lib
++	sudo cp libvkeys.h /usr/include
++
++clean:
++	rm libvkeys.o libvkeys.so libvkeyss.o libvkeyss.so
+diff --git a/src/base/platform/libvkeys/libvkeys.c b/src/base/platform/libvkeys/libvkeys.c
+new file mode 100644
+index 00000000..47bc17af
+--- /dev/null
++++ b/src/base/platform/libvkeys/libvkeys.c
+@@ -0,0 +1,403 @@
++#include "libvkeys.h"
++#include <sys/syscall.h>
++#include <sys/mman.h>
++#include <stddef.h>
++
++
++// Definition Derivatives
++#define MAX_VKRU_PER_PROC       ((VKEY_META_DATA_SZ - 1) / (INTEL_L1_BYTES + 1))  /* 1 bit for allocation bm */
++#define VKEY_LOCK_OFFSET        (INTEL_L1_BYTES / 2)        /* 8 bytes, unsigned long */
++#define VKRU_OFFSET             ((MAX_VKRU_PER_PROC / 8 + INTEL_L1_BYTES - 1) / INTEL_L1_BYTES)
++#define VKEY_TRAMP_ACT_SZ       (4096 * 1)
++#define VKEY_XOK                (1)
++#define arch_max_pkey()         (16)
++#define arch_max_vkey()         (128)
++#define GDT_ENTRY_PER_CPU       15	/* Abused to load per CPU data from limit */
++#define __PER_CPU_SEG	        (GDT_ENTRY_PER_CPU * 8 + 3)
++#if arch_max_vkey() > (1024 * 64)
++typedef unsigned long vpmap_t;
++#define VPMAP_LONGS		15
++#elif arch_max_vkey() > (256)
++typedef u16 vpmap_t;
++#define VPMAP_LONGS		4
++#else
++typedef char vpmap_t;
++#define VPMAP_LONGS		2
++#endif
++
++
++
++// Protected Data
++__attribute__((aligned(4096))) static char red_zone[4096];
++__attribute__((aligned(4096))) static char vkru_meta_and_data[VKEY_META_DATA_SZ];
++__attribute__((aligned(4096))) static char vkru_ro_tramp[VKEY_TRAMP_ACT_SZ];
++
++
++int ready = -1; 
++
++// Static Functions
++static inline unsigned int __getcpu(void)
++{
++       unsigned int p;
++
++       /*
++        * Load per CPU data from GDT.  LSL is faster than RDTSCP and
++        * works on all CPUs.  This is volatile so that it orders
++        * correctly wrt barrier() and to keep gcc from cleverly
++        * hoisting it out of the calling function.
++        */
++       __asm__ volatile ("lsl %1,%0" : "=r" (p) : "r" (__PER_CPU_SEG));
++
++       return (p & 0xfff);
++}
++
++static inline int vkey_reg_lib(void *laddr, void *taddr)
++{
++    return syscall(syscall_vkey_reg_lib, laddr, taddr);
++}
++
++static inline vkru_t **get_current_thread_vkru(void)
++{
++    return (vkru_t **)((unsigned long)vkru_ro_tramp + __getcpu() * INTEL_L1_BYTES);
++}
++
++static inline int get_bm_offset(char bm)
++{       
++    if (!(bm & 0x01))               
++        return 0;                   
++    if (!(bm & 0x02))               
++        return 1;                   
++    if (!(bm & 0x04))               
++        return 2;                   
++    if (!(bm & 0x08))               
++        return 3;                   
++    if (!(bm & 0x10))               
++        return 4;                   
++    if (!(bm & 0x20))               
++        return 5;                   
++    if (!(bm & 0x40))               
++        return 6;                   
++    return 7;                       
++}
++
++static inline void lock_bm()
++{
++    volatile unsigned long *lock = (unsigned long *)(vkru_meta_and_data + VKEY_LOCK_OFFSET);
++    while (!__sync_bool_compare_and_swap(lock, 0, 1)) {
++        while (*lock);
++    }
++}
++
++static inline void unlock_bm()
++{
++    __asm__ volatile ("":::"memory");
++    *(unsigned long *)(vkru_meta_and_data + VKEY_LOCK_OFFSET) = 0;
++}
++
++static inline unsigned int rdpkru(void)
++{
++	unsigned int ecx = 0;
++	unsigned int edx, pkru;
++
++	/*
++	 * "rdpkru" instruction.  Places PKRU contents in to EAX,
++	 * clears EDX and requires that ecx=0.
++	 */
++	__asm__ volatile(".byte 0x0f,0x01,0xee\n\t"
++		     : "=a" (pkru), "=d" (edx)
++		     : "c" (ecx));
++	return pkru;
++}
++
++static inline void wrpkru(unsigned int pkru)
++{
++	unsigned int ecx = 0, edx = 0;
++
++	/*
++	 * "wrpkru" instruction.  Loads contents in EAX to PKRU,
++	 * requires that ecx = edx = 0.
++	 */
++	__asm__ volatile(".byte 0x0f,0x01,0xef\n\t"
++		     : : "a" (pkru), "c"(ecx), "d"(edx));
++}
++
++static inline unsigned int pkru_set_bits_dis(int pkey, int perm) 
++{
++	unsigned int pkru;
++	pkru = rdpkru();
++	if (pkey != arch_max_pkey()) {
++		pkru &= (~(0x3 << (pkey << 1)));
++		pkru |= ((perm & 0x3) << (pkey << 1));
++#ifndef VKEY_SAFE
++        pkru |= 0x4;
++        wrpkru(pkru);
++#endif
++	}
++#ifdef VKEY_SAFE
++	pkru |= 0x4;
++	wrpkru(pkru);
++#endif
++  //seems to be void anyways^^
++  return pkru;
++}
++
++static inline int vkey_init_c(bool sprot)
++{
++    // push ebp, mov ebp esp... prologue
++    // Initialize VKeyS in kernel.
++    //      1. Get the address in the process.
++    //      2. Syscall to register the library and lock the corresponding VMA.
++    //      3. Allocate the HW_CACHE_ALIGN (to avoid coherence protocol) VKRU bm.
++    //      4. VKRU activates self protection.
++    //      5. Get the fixed kernel mappings of vkey-pkey mapping of different VKSes.
++    //volatile int ret;
++
++    // Step 3
++    for (register int i = 0; i < MAX_VKRU_PER_PROC / 8; i++)
++        vkru_meta_and_data[i] = 0;
++    *(unsigned long *)(vkru_meta_and_data + VKEY_LOCK_OFFSET) = 0;
++
++    // Step 1, 2 and 4
++    if (pkey_mprotect(vkru_ro_tramp, VKEY_TRAMP_ACT_SZ, PROT_READ, 0) ||
++        pkey_mprotect(red_zone, 4096, PROT_READ, 0))
++        return -1;
++    if (vkey_reg_lib(vkru_meta_and_data, vkru_ro_tramp))
++        return -2;
++#ifdef VKEY_SAFE
++    if (pkey_mprotect(vkru_meta_and_data, VKEY_META_DATA_SZ, PROT_READ | PROT_WRITE, VKEY_SPROT))
++#else
++    if (pkey_mprotect(vkru_meta_and_data, VKEY_META_DATA_SZ, PROT_READ | PROT_WRITE, 0))
++#endif
++        return -3;
++
++    return 0;
++}
++
++static inline vkru_t *vkru_alloc_c(int nas)
++{
++    vkru_t *ret = NULL;
++    int i;
++
++    lock_bm();   /* spinlock */
++    for (i = 0; i < MAX_VKRU_PER_PROC / 8; i++)
++        if (vkru_meta_and_data[i] != -1) {
++            if (syscall(syscall_vkey_reg_vkru, (unsigned long)
++                (ret = (vkru_t *)(vkru_meta_and_data + INTEL_L1_BYTES * VKRU_OFFSET) +
++                 8 * i + get_bm_offset(vkru_meta_and_data[i])), nas) == 0)
++                vkru_meta_and_data[i] |= (1 << get_bm_offset(vkru_meta_and_data[i]));
++            break;
++        }
++    unlock_bm();
++    return ret;
++}
++
++static inline void vkru_free_c(void)
++{
++    lock_bm();
++    // Free the metadata in userspace, then check if the thread kills its own vkru
++    vkru_t *vkru = *get_current_thread_vkru();
++    if (syscall(syscall_vkey_reg_vkru, NULL))
++        vkru_meta_and_data[((unsigned long)vkru - (unsigned long)vkru_meta_and_data - INTEL_L1_BYTES * VKRU_OFFSET) / sizeof(vkru_t) / 8] &= 
++            (~(0x1 << ((((unsigned long)vkru - (unsigned long)vkru_meta_and_data - INTEL_L1_BYTES * VKRU_OFFSET) / sizeof(vkru_t)) & 0x7)));
++    unlock_bm();
++}
++
++static inline long wrvkru_c(int vkey, int perm, vkru_t **vkrupp)
++{
++    // Write perm to the VKRU of the thread, if the VKS activates the vkey, wrpkru too.
++    //      1. Go through the call gate (1st wrpkru) to get permission to write (any) VKRU.
++    //      2. Get which VKS and which VKRU to write through kernel-mapped vDSO for security issues.
++    //      3. Change the permission of VKRU and maybe 2nd wrpkru.
++    //      4. Use the 3rd wrpkru and switch back to the untrusted world.
++
++    vkru_t *vkru;
++    vpmap_t *vkm;
++    register long i;
++
++    // TODO: Step 1 and 4 for security
++
++    // Step 2 and 3
++    vkru = *vkrupp;
++    vkm = (vpmap_t *)((size_t)vkrupp + 8);
++    for (i = VKEY_XOK; i < arch_max_pkey() - 1; i++)
++        if (vkm[i] == vkey)
++            break;
++    if (vkru) {
++        vkru->perm[vkey / 4] &= (~(0x3 << (2 * (vkey & 0x3))));
++        vkru->perm[vkey / 4] |= ((perm & 0x3) << (2 * (vkey & 0x3)));
++    }
++    return i;
++}
++
++
++int vkey_ready(void) {
++  return ready == 0;
++}
++
++// Common API
++// Here, we must guarantee that even with ROP
++int vkey_init(register bool sprot)
++{
++    register long ret;
++
++    ret = vkey_init_c(sprot);
++    ready = ret;
++
++    return ret;
++}
++
++// No need to protect
++int vkey_alloc(void)
++{
++    // Simple wrapper for syscall.
++    return syscall(syscall_vkey_alloc);
++}
++
++// No need to protect
++int vkey_free(int vkey)
++{
++    // Simple wrapper for syscall.
++    return syscall(syscall_vkey_free, vkey);
++}
++
++// No need to protect
++int vkey_mprotect(void *addr, size_t len, int vkey)
++{
++    // Simple wrapper for syscall.
++    return syscall(syscall_vkey_mprotect, addr, len, PROT_READ | PROT_WRITE, vkey);
++}
++
++vkru_t *vkru_alloc(int nas)
++{
++    register vkru_t *ret;
++
++#ifdef VKEY_SAFE
++    __asm__ volatile (
++        "xorl %%ecx, %%ecx\n\t"
++        "rdpkru\n\t"
++        "andl $0xfffffff3, %%eax\n\t"
++        "wrpkru"
++        ::: "memory"
++    );
++#endif
++
++    ret = vkru_alloc_c(nas);    /* nas is not security critical, no stack switch */
++
++#ifdef VKEY_SAFE
++    __asm__ volatile (
++        "movq %0, %%r12\n\t"
++        "xorl %%ecx, %%ecx\n\t"
++        "rdpkru\n\t"
++        "orl $0x55555554, %%eax\n\t"
++        "wrpkru\n\t"
++        "andl $0xc,  %%eax\n\t"
++        "cmpl $0x4,  %%eax\n\t"
++        "jne 0x0\n\t"
++        "movq %%r12, %%rax"
++        :: "r"(ret) : "memory"
++    );
++#else
++    wrpkru(0x55555554);
++#endif
++
++    return ret;
++}
++
++void vkru_free(void)
++{
++#ifdef VKEY_SAFE
++    __asm__ volatile (
++        "xorl %%ecx, %%ecx\n\t"
++        "rdpkru\n\t"
++        "andl $0xfffffff3, %%eax\n\t"
++        "wrpkru\n\t"
++        ::: "memory"
++    );
++#endif
++
++    vkru_free_c();
++
++#ifdef VKEY_SAFE
++    __asm__ volatile (
++        "xorl %%ecx, %%ecx\n\t"
++        "rdpkru\n\t"
++        "orl $0x4,  %%eax\n\t"
++        "wrpkru\n\t"
++        "andl $0xc,  %%eax\n\t"
++        "cmpl $0x4,  %%eax\n\t"
++        "jne 0x0\n\t"
++        ::: "memory"
++    );
++#endif
++}
++
++void wrvkru(int vkey, int perm)
++{
++    register long rsp;
++    register vkru_t **vkrupp;
++
++#ifdef VKEY_SAFE
++    __asm__ volatile (
++        "xorl %%ecx, %%ecx\n\t"
++        "rdpkru\n\t"
++        "andl $0xfffffff3, %%eax\n\t"
++        "wrpkru\n\t"
++        "movq %%rsp, %0"
++        : "=r"(rsp) :: "memory"
++    );
++#endif
++
++    vkrupp = get_current_thread_vkru();
++
++#ifdef VKEY_SAFE
++    __asm__ volatile (
++        "add $64, %1\n\t"
++        "movq %1, %%rsp\n\t"
++        "push %0"
++        :: "r"(rsp), "r"(*vkrupp) : "memory"
++    );
++#endif
++
++    rsp = wrvkru_c(vkey, perm, vkrupp) + 1;
++
++    // syscall of vkey activate
++    if (rsp == arch_max_pkey() && !(perm & VKEY_MASK))
++        __asm__ volatile (
++            "movq $340L, %%rax\n\t"
++            "movq %0, %%rdi\n\t"
++            "syscall\n\t"
++            :: "r"((long)vkey) : "memory"
++        );
++
++#ifdef VKEY_SAFE
++    __asm__ volatile (
++        "pop %%rsp\n\t"
++        :::"memory"
++    );
++#endif
++
++    pkru_set_bits_dis(rsp, perm);
++
++#ifdef VKEY_SAFE
++    __asm__ volatile (
++        "andl $0xc,  %%eax\n\t"
++        "cmpl $0x4,  %%eax\n\t"
++        "jne 0x0\n\t"
++        ::: "memory"
++    );
++#endif
++}
++
++// Read only
++int rdvkru(int vkey)
++{
++#ifndef VKEY_SAFE
++    // A dummy interface for now.
++    vkru_t *vkru = *get_current_thread_vkru();
++    if (vkru)
++        return (vkru->perm[vkey / 4] >> (2 * (vkey & 0x3))) & 0x3;
++    return VKEY_AD | VKEY_WD;
++#else
++    return -1;
++#endif
++}
+diff --git a/src/base/platform/libvkeys/libvkeys.h b/src/base/platform/libvkeys/libvkeys.h
+new file mode 100644
+index 00000000..f2753a8b
+--- /dev/null
++++ b/src/base/platform/libvkeys/libvkeys.h
+@@ -0,0 +1,52 @@
++#pragma once
++
++#include <unistd.h>
++#include <stdbool.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define syscall_vkey_reg_lib    335
++#define syscall_vkey_alloc      336
++#define syscall_vkey_free       337
++#define syscall_vkey_mprotect   338
++#define syscall_vkey_reg_vkru   339
++#define syscall_vkey_activate   340
++
++#define VKEY_AD     0x1		/* access  disable */
++#define VKEY_WD     0x2		/* write   disable */
++#define VKEY_ND     0x0		/* nothing disable */
++#define VKEY_PINNED 0x3
++
++#define VKEY_AD_INIT    0x5 /* access   disable when init */
++#define VKEY_WD_INIT    0x6 /* write    disable when init */
++#define VKEY_ND_INIT    0x4 /* nothing  disable when init */
++#define VKEY_MASK       0x4
++
++#define VKEY_SPROT  0x1     /* self protection vkey */
++
++#define MAX_VKEY_PER_SPACE  14
++#define MAX_VKEY_PER_PROC   128
++#define VKEY_META_DATA_SZ   8192
++#define INTEL_L1_BYTES      64
++#define VKEY_TRAMP_MAX_SZ   8192
++
++typedef struct {
++    char perm[MAX_VKEY_PER_PROC / 4];   /* 32 bytes, another 32 bytes as the safe stack */
++    char stack[INTEL_L1_BYTES - MAX_VKEY_PER_PROC / 4];
++} vkru_t;
++
++__attribute__ ((visibility("default"))) int vkey_init(bool sprot);  /* self prot */
++__attribute__ ((visibility("default"))) int vkey_alloc(void);       /* syscall */
++__attribute__ ((visibility("default"))) int vkey_free(int vkey);    /* syscall */
++__attribute__ ((visibility("default"))) int vkey_mprotect(void *addr, size_t len, int vkey);    /* syscall */
++__attribute__ ((visibility("default"))) vkru_t *vkru_alloc(int nas);   /* self prot */
++__attribute__ ((visibility("default"))) void vkru_free(void);       /* self prot */
++__attribute__ ((visibility("default"))) void wrvkru(int vkey, int perm);    /* self prot */
++__attribute__ ((visibility("default"))) int rdvkru(int vkey);       /* self prot */
++__attribute__ ((visibility("default"))) int vkey_ready(void);       /* self prot */
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/execution/isolate.cc b/src/execution/isolate.cc
+index 1aa88480..7ceb61f8 100644
+--- a/src/execution/isolate.cc
++++ b/src/execution/isolate.cc
+@@ -124,6 +124,9 @@
+ #include "src/strings/string-stream.h"
+ #include "src/tasks/cancelable-task.h"
+ 
++#include "src/base/platform/libvkeys/libvkeys.h"
++
++
+ #if defined(V8_USE_PERFETTO)
+ #include "src/tracing/perfetto-logger.h"
+ #endif  // defined(V8_USE_PERFETTO)
+@@ -531,6 +534,7 @@ namespace {
+ std::atomic<int> isolate_counter{0};
+ }  // namespace
+ 
++__thread vkru_t *vkru = nullptr;
+ Isolate::PerIsolateThreadData*
+ Isolate::FindOrAllocatePerThreadDataForThisThread() {
+   ThreadId thread_id = ThreadId::Current();
+@@ -542,7 +546,41 @@ Isolate::FindOrAllocatePerThreadDataForThisThread() {
+       if (v8_flags.adjust_os_scheduling_parameters) {
+         base::OS::AdjustSchedulingParams();
+       }
+-      per_thread = new PerIsolateThreadData(this, thread_id);
++      //Start
++      int vkey = -1;
++      if(vkey_ready()) {
++	if(vkru == nullptr) {
++	  vkru = vkru_alloc(1);
++          fprintf(stderr,"vkru_alloc: %p\n",vkru);
++	}
++	if (!vkru) {
++          fprintf(stderr,"VKRU Alloc failed");
++  	  fflush(stderr);
++	} else {
++	  vkey = vkey_alloc();
++    	  fprintf(stderr,"isolate.cc: VKEY-Alloc %d\n",vkey);
++   	  if(vkey > 0) {
++	    wrvkru(vkey, VKEY_ND);
++	  }
++	}
++      }
++      // Approach 2 Pkey
++      /*int pkey = pkey_alloc(0, PKEY_DISABLE_ACCESS);
++      if(pkey == -1) {
++        fprintf(stderr,"Could not allocate pkey\n");
++      }
++      int status = pkey_set(pkey,0);
++      if(status) {
++        fprintf(stderr,"pkey_set failed\n");
++      }
++      status = pkey_set(pkey, PKEY_DISABLE_ACCESS);
++      if(status) {
++        fprintf(stderr,"pkey_set2 failed\n");
++      }
++      */
++      per_thread = new PerIsolateThreadData(this, thread_id,vkey);
++      //per_thread = new PerIsolateThreadData(this, thread_id,pkey);
++      //per_thread = new PerIsolateThreadData(this, thread_id);
+       thread_data_table_.Insert(per_thread);
+     }
+     DCHECK(thread_data_table_.Lookup(thread_id) == per_thread);
+diff --git a/src/execution/isolate.h b/src/execution/isolate.h
+index 0e713824..007b2b6c 100644
+--- a/src/execution/isolate.h
++++ b/src/execution/isolate.h
+@@ -592,11 +592,12 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+   // and reused on subsequent entries.
+   class PerIsolateThreadData {
+    public:
+-    PerIsolateThreadData(Isolate* isolate, ThreadId thread_id)
++    PerIsolateThreadData(Isolate* isolate, ThreadId thread_id, int vkey)
+         : isolate_(isolate),
+           thread_id_(thread_id),
+           stack_limit_(0),
+-          thread_state_(nullptr)
++          thread_state_(nullptr),
++	  vkey_(vkey)
+ #if USE_SIMULATOR
+           ,
+           simulator_(nullptr)
+@@ -608,6 +609,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+     PerIsolateThreadData& operator=(const PerIsolateThreadData&) = delete;
+     Isolate* isolate() const { return isolate_; }
+     ThreadId thread_id() const { return thread_id_; }
++    int vkey() const { return vkey_;}
+ 
+     FIELD_ACCESSOR(uintptr_t, stack_limit)
+     FIELD_ACCESSOR(ThreadState*, thread_state)
+@@ -624,6 +626,7 @@ class V8_EXPORT_PRIVATE Isolate final : private HiddenFactory {
+     ThreadId thread_id_;
+     uintptr_t stack_limit_;
+     ThreadState* thread_state_;
++    int vkey_;
+ 
+ #if USE_SIMULATOR
+     Simulator* simulator_;
+diff --git a/src/heap/memory-allocator.cc b/src/heap/memory-allocator.cc
+index b564450e..62f79311 100644
+--- a/src/heap/memory-allocator.cc
++++ b/src/heap/memory-allocator.cc
+@@ -22,6 +22,7 @@
+ #include "src/logging/log.h"
+ #include "src/sandbox/hardware-support.h"
+ #include "src/utils/allocation.h"
++#include "src/base/platform/libvkeys/libvkeys.h"
+ 
+ namespace v8 {
+ namespace internal {
+@@ -164,8 +165,29 @@ Address MemoryAllocator::AllocateAlignedMemory(
+ 
+   if (executable == EXECUTABLE) {
+     ThreadIsolation::RegisterJitPage(base, chunk_size);
++  } else {
++    //BEGIN
++    // JIT Pages
++    fprintf(stderr,"Isolate: %p, CurrentPerIsolateThreadData %p\n",isolate_,isolate_->FindOrAllocatePerThreadDataForThisThread());
++    int vkey = isolate_->CurrentPerIsolateThreadData()->vkey();
++    
++    /*int status = pkey_set(vkey,0);
++    if(status) {
++      fprintf(stderr,"pkey_set");
++      return EXIT_FAILURE;
++    }*/
++
++    fprintf(stderr,"---------------\nvkey is %d\n",vkey);
++    fflush(stderr);
++    if(vkey != -1) {
++      fprintf(stderr,"Protecting memory region: 0x%zx-0x%zx with vkey %d\n",(size_t)reservation.address(),(size_t)((size_t)reservation.address()+chunk_size),vkey);
++      //pkey_mprotect(reinterpret_cast<void*>(base), chunk_size, PROT_READ|PROT_WRITE,vkey);
++      vkey_mprotect(reinterpret_cast<void*>(base), chunk_size, vkey);
++      wrvkru(vkey, VKEY_ND);
++      fprintf(stderr,"Tid: %d\n-------------\n",gettid());
++      fflush(stderr);
++    }
+   }
+-
+   UpdateAllocatedSpaceLimits(base, base + chunk_size, executable);
+ 
+   *controller = std::move(reservation);

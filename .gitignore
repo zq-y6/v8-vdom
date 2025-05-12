@@ -1,0 +1,4 @@
+kbuild/
+mnt/
+rootfs_base/
+rootfs.img
