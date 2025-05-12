@@ -1,4 +1,4 @@
-### Code path
+### Code patch
 1. In kernel/, we have x86_linux.diff
 2. In v8, we have diff.patch
 
